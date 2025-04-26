@@ -6,13 +6,24 @@ from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+import altair as alt
+from sklearn.svm import SVC
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neighbors import KNeighborsClassifier
 
 # Load data
 @st.cache_data
 def load_data():
-    products = pd.read_csv("products.csv")
-    orders = pd.read_csv("orders.csv")
     reviews = pd.read_csv("product_reviews.csv")
+    reviews.rename(columns={
+        'pid': 'product_id',
+        'categories': 'category',
+        'name': 'name',
+        'reviews': 'reviews'
+    }, inplace=True)
+    products = reviews[['product_id', 'name', 'category']].drop_duplicates()
+    orders = pd.DataFrame({'order_id': [1001, 1002, 1003], 'status': ['Shipped', 'Delivered', 'Processing']})  # mock data
     return products, orders, reviews
 
 def analyze_sentiment(text):
@@ -32,14 +43,28 @@ def train_sentiment_model(reviews_df):
     vectorizer = TfidfVectorizer(stop_words='english', max_features=5000)
     X_train_vec = vectorizer.fit_transform(X_train)
     X_test_vec = vectorizer.transform(X_test)
-    model = LogisticRegression(max_iter=1000)
-    model.fit(X_train_vec, y_train)
-    y_pred = model.predict(X_test_vec)
-    acc = accuracy_score(y_test, y_pred)
-    prec = precision_score(y_test, y_pred, average='weighted', zero_division=0)
-    rec = recall_score(y_test, y_pred, average='weighted', zero_division=0)
-    f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
-    return model, vectorizer, (acc, prec, rec, f1)
+    
+    models = {
+        "Logistic Regression": LogisticRegression(max_iter=1000),
+        "SVM": SVC(),
+        "Naive Bayes": MultinomialNB(),
+        "Random Forest": RandomForestClassifier(),
+        "KNN": KNeighborsClassifier()
+    }
+
+    performance_metrics = {}
+
+    for model_name, model in models.items():
+        model.fit(X_train_vec, y_train)
+        y_pred = model.predict(X_test_vec)
+        acc = accuracy_score(y_test, y_pred)
+        prec = precision_score(y_test, y_pred, average='weighted', zero_division=0)
+        rec = recall_score(y_test, y_pred, average='weighted', zero_division=0)
+        f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
+        performance_metrics[model_name] = [acc, prec, rec, f1]
+
+    # Return logistic regression model by default
+    return models["Logistic Regression"], vectorizer, performance_metrics
 
 def chatbot_response(user_input, products, orders, reviews, model, vectorizer, performance_metrics):
     user_input = user_input.lower()
@@ -48,12 +73,10 @@ def chatbot_response(user_input, products, orders, reviews, model, vectorizer, p
         search_words = re.findall(r'\b\w+\b', user_input)
         found = pd.DataFrame()
         for word in search_words:
-            found = pd.concat([found, products[products['name'].str.lower().str.contains(word)]])
-        found = found.drop_duplicates()
-
+            found = pd.concat([found, products[products['name'].str.lower().str.contains(word)]]).drop_duplicates()
         if not found.empty:
             st.subheader("Search Results")
-            st.table(found[["name", "price"]])
+            st.table(found[["name"]])
             return "Here are some products I found."
         else:
             return "Sorry, no products found."
@@ -74,18 +97,8 @@ def chatbot_response(user_input, products, orders, reviews, model, vectorizer, p
     elif "recommend" in user_input or "suggest" in user_input:
         sample = products.sample(3)
         st.subheader("Product Recommendations")
-        st.table(sample[["name", "price"]])
+        st.table(sample[["name"]])
         return "Here are some product recommendations."
-
-    elif "performance" in user_input or "metric" in user_input:
-        acc, prec, rec, f1 = performance_metrics
-        st.subheader("Model Performance")
-        perf_df = pd.DataFrame({
-            "Metric": ["Accuracy", "Precision", "Recall", "F1 Score"],
-            "Value": [acc, prec, rec, f1]
-        })
-        st.table(perf_df)
-        return f"Model Performance:\nAccuracy: {acc:.2f}\nPrecision: {prec:.2f}\nRecall: {rec:.2f}\nF1 Score: {f1:.2f}"
 
     elif "reviews" in user_input:
         product_name = re.findall(r'"([^"]*)"', user_input)
@@ -95,7 +108,7 @@ def chatbot_response(user_input, products, orders, reviews, model, vectorizer, p
         else:
             return "Please provide the product name in quotes to see reviews."
 
-    elif "category" in user_input:
+    elif "category" in user_input and "top" not in user_input:
         category_name = re.findall(r'"([^"]*)"', user_input)
         if category_name:
             category_products = get_products_in_category(category_name[0], products)
@@ -110,41 +123,36 @@ def chatbot_response(user_input, products, orders, reviews, model, vectorizer, p
             top_products = get_top_n_products_by_sentiment(category_name[0], int(num_products[0]), products, reviews, model, vectorizer)
             return top_products
         else:
-            return "Please provide the category name in quotes and the number of products (e.g., top 5 category \"Electronics\")."
+            return "Please provide the category name in quotes and the number of products."
 
     else:
-        return "I can help with product search, order tracking, recommendations, reviews, category search, or top category products. Try typing: top 5 category \"Electronics\""
+        return "I can help with product search, order tracking, recommendations, reviews, category search, or top category products."
 
 def get_product_reviews(product_name, products, reviews):
     product = products[products['name'].str.lower() == product_name.lower()]
     if product.empty:
         return "Product not found."
-
     product_id = product.iloc[0]['product_id']
     product_reviews = reviews[reviews['product_id'] == product_id]
-
     if product_reviews.empty:
         return "No reviews found for this product."
-
     review_text = "Product Reviews:\n"
     for _, review in product_reviews.iterrows():
-        review_text += f"Rating: {review['rating']}, Review: {review['reviews']}\n"
+        review_text += f"- Review: {review['reviews']}\n"
     return review_text
 
 def get_products_in_category(category_name, products):
     category_products = products[products['category'].str.lower() == category_name.lower()]
     if category_products.empty:
         return "Category not found."
-
     st.subheader(f"Products in {category_name}")
-    st.table(category_products[["name", "price"]])
+    st.table(category_products[["name"]])
     return f"Products in {category_name}."
 
 def get_top_n_products_by_sentiment(category_name, n, products, reviews, model, vectorizer):
     category_products = products[products['category'].str.lower() == category_name.lower()]
     if category_products.empty:
         return "Category not found."
-
     product_sentiments = []
     for _, product in category_products.iterrows():
         product_reviews = reviews[reviews['product_id'] == product['product_id']]
@@ -154,28 +162,20 @@ def get_top_n_products_by_sentiment(category_name, n, products, reviews, model, 
             predicted_sentiments = model.predict(reviews_vec)
             positive_count = sum(1 for sentiment in predicted_sentiments if sentiment == 'positive')
             total_reviews = len(predicted_sentiments)
-            if total_reviews > 0:
-                positive_ratio = positive_count / total_reviews
-            else:
-                positive_ratio = 0
+            positive_ratio = positive_count / total_reviews if total_reviews > 0 else 0
             product_sentiments.append({
                 "Product Name": product['name'],
-                "Positive Sentiment Ratio": round(positive_ratio, 2),
-                "Price ($)": product['price']
+                "Positive Sentiment Ratio": round(positive_ratio, 2)
             })
-
     sorted_products = sorted(product_sentiments, key=lambda x: x["Positive Sentiment Ratio"], reverse=True)[:n]
-
     if not sorted_products:
         return "No reviews found for products in this category."
-
     df = pd.DataFrame(sorted_products)
     st.subheader(f"Top {n} Products in {category_name}")
     st.table(df)
-
     return f"Showing top {n} products in {category_name} based on sentiment ratings."
 
-# App Layout
+# Streamlit App Layout
 st.title("\U0001F6D2 E-commerce Chatbot")
 
 products, orders, reviews = load_data()
@@ -184,68 +184,34 @@ model, vectorizer, performance_metrics = train_sentiment_model(reviews)
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-# Product Comparison Feature
-st.sidebar.subheader("Product Comparison")
-product_names = products['name'].tolist()
-selected_product1 = st.sidebar.selectbox("Select Product 1", product_names)
-selected_product2 = st.sidebar.selectbox("Select Product 2", product_names, index=1)
+# Show Model Comparison (Table and Graph)
+if st.button("Show Model Comparison Results"):
+    st.subheader("Sentiment Analysis - Model Performance (Table)")
 
-if st.sidebar.button("Compare Products"):
-    product1 = products[products['name'] == selected_product1].iloc[0]
-    product2 = products[products['name'] == selected_product2].iloc[0]
+    metric_names = ["Accuracy", "Precision", "Recall", "F1 Score"]
+    perf_df = pd.DataFrame(performance_metrics, index=metric_names).T.reset_index().rename(columns={"index": "Model"})
+    st.table(perf_df)
 
-    product1_reviews = reviews[reviews['product_id'] == product1['product_id']]['reviews'].fillna('').tolist()
-    product2_reviews = reviews[reviews['product_id'] == product2['product_id']]['reviews'].fillna('').tolist()
+    st.subheader("Sentiment Analysis - Model Performance (Line Chart)")
+    perf_melted = perf_df.melt(id_vars="Model", var_name="Metric", value_name="Score")
+    chart = alt.Chart(perf_melted).mark_line(point=True).encode(
+        x='Metric:N',
+        y='Score:Q',
+        color='Model:N'
+    ).properties(width=700, height=400)
+    st.altair_chart(chart, use_container_width=True)
 
-    if product1_reviews:
-        product1_vec = vectorizer.transform(product1_reviews)
-        product1_sentiments = model.predict(product1_vec)
-        product1_positive_ratio = sum(1 for sentiment in product1_sentiments if sentiment == 'positive') / len(product1_sentiments)
-    else:
-        product1_positive_ratio = 0
-
-    if product2_reviews:
-        product2_vec = vectorizer.transform(product2_reviews)
-        product2_sentiments = model.predict(product2_vec)
-        product2_positive_ratio = sum(1 for sentiment in product2_sentiments if sentiment == 'positive') / len(product2_sentiments)
-    else:
-        product2_positive_ratio = 0
-
-    comparison_df = pd.DataFrame({
-        "Feature": ["Name", "Category", "Price", "Positive Sentiment Ratio"],
-        selected_product1: [product1['name'], product1['category'], product1['price'], round(product1_positive_ratio, 2)],
-        selected_product2: [product2['name'], product2['category'], product2['price'], round(product2_positive_ratio, 2)]
-    })
-    st.subheader("Product Comparison")
-    st.table(comparison_df)
-
-    if product1_positive_ratio > product2_positive_ratio:
-        st.write(f"Based on sentiment, {selected_product1} is preferred.")
-    elif product2_positive_ratio > product1_positive_ratio:
-        st.write(f"Based on sentiment, {selected_product2} is preferred.")
-    else:
-        st.write("Both products have similar sentiment scores.")
-
+# Chat UI
 user_input = st.text_input("You:", key="chat_input")
-st.markdown("### Try these sample queries:")
-st.markdown("- `top 5 category \"Electronics\"` - Get top 5 products in Electronics")
-st.markdown("- `search \"Portable Cream \"` - Find products related to Portable Cream")
-st.markdown("- `track order 1001` - Check the status of order 1001")
-st.markdown("- `recommend products` - Get product recommendations")
-st.markdown("- `show reviews \"Portable Cream\"` - Get reviews for Portable Cream")
+st.markdown("### Sample queries:")
+st.markdown("- `top 5 category \"Amazon Devices\"`")
+st.markdown("- `search Kindle Keyboard`")
+st.markdown("- `track order 1001`")
+st.markdown("- `recommend products`")
+st.markdown("- `show reviews \"Kindle Paperwhite\"`")
 
 if user_input:
-    if "top" in user_input.lower() and "category" in user_input.lower():
-        category_name = re.findall(r'"([^"]*)"', user_input)
-        num_products = re.findall(r'\d+', user_input)
-        if category_name and num_products:
-            table_message = get_top_n_products_by_sentiment(category_name[0], int(num_products[0]), products, reviews, model, vectorizer)
-            response = table_message
-        else:
-            response = "Please provide the category name in quotes and the number of products (e.g., top 5 category \"Electronics\")."
-    else:
-        response = chatbot_response(user_input, products, orders, reviews, model, vectorizer, performance_metrics)
-
+    response = chatbot_response(user_input, products, orders, reviews, model, vectorizer, performance_metrics)
     st.session_state.chat_history.insert(0, ("Bot", response))
     st.session_state.chat_history.insert(0, ("User", user_input))
 
@@ -254,3 +220,42 @@ for sender, message in reversed(st.session_state.chat_history):
         st.markdown(f"*You:* {message}")
     else:
         st.markdown(f"\U0001F9E0 *Bot:* {message}")
+
+
+# Product Comparison in Sidebar
+with st.sidebar:
+    st.header("Product Comparison")
+    product1_name = st.selectbox("Select Product 1", products['name'].tolist())
+    product2_name = st.selectbox("Select Product 2", products['name'].tolist())
+
+    if st.button("Compare Products"):
+        # Get sentiment scores for both products
+        product1 = products[products['name'] == product1_name]
+        product2 = products[products['name'] == product2_name]
+        
+        if product1.empty or product2.empty:
+            st.write("One or both products not found.")
+        else:
+            product1_reviews = reviews[reviews['product_id'] == product1.iloc[0]['product_id']]['reviews'].fillna('').tolist()
+            product2_reviews = reviews[reviews['product_id'] == product2.iloc[0]['product_id']]['reviews'].fillna('').tolist()
+
+            # Vectorize the reviews and predict sentiments
+            product1_reviews_vec = vectorizer.transform(product1_reviews)
+            product2_reviews_vec = vectorizer.transform(product2_reviews)
+
+            product1_pred_sentiments = model.predict(product1_reviews_vec)
+            product2_pred_sentiments = model.predict(product2_reviews_vec)
+
+            # Calculate positive sentiment ratio for both products
+            product1_positive_ratio = sum(1 for sentiment in product1_pred_sentiments if sentiment == 'positive') / len(product1_pred_sentiments) if len(product1_pred_sentiments) > 0 else 0
+            product2_positive_ratio = sum(1 for sentiment in product2_pred_sentiments if sentiment == 'positive') / len(product2_pred_sentiments) if len(product2_pred_sentiments) > 0 else 0
+
+            # Compare and recommend the better product
+            if product1_positive_ratio > product2_positive_ratio:
+                recommended_product = product1_name
+                st.write(f"**{recommended_product}** is better based on sentiment analysis.")
+            elif product1_positive_ratio < product2_positive_ratio:
+                recommended_product = product2_name
+                st.write(f"**{recommended_product}** is better based on sentiment analysis.")
+            else:
+                st.write("Both products are equally rated based on sentiment analysis.")
